@@ -97,3 +97,5 @@ log.txt
 *.bak
 
 tools/
+/.vs
+/gcli2api-master/.vs

@@ -1140,6 +1140,185 @@
             gap: 10px;
             justify-content: flex-end;
         }
+
+        /* 消息模态框样式 */
+        .message-modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.5);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 10000;
+            animation: fadeIn 0.2s ease-in;
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+            }
+            to {
+                opacity: 1;
+            }
+        }
+
+        .message-modal {
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+            max-width: 600px;
+            width: 90%;
+            max-height: 80vh;
+            display: flex;
+            flex-direction: column;
+            animation: slideIn 0.3s ease-out;
+        }
+
+        @keyframes slideIn {
+            from {
+                transform: translateY(-50px);
+                opacity: 0;
+            }
+            to {
+                transform: translateY(0);
+                opacity: 1;
+            }
+        }
+
+        .message-modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 20px 24px;
+            border-bottom: 1px solid #e0e0e0;
+        }
+
+        .message-modal.success .message-modal-header {
+            background: linear-gradient(135deg, #4caf50 0%, #45a049 100%);
+            color: white;
+            border-radius: 8px 8px 0 0;
+        }
+
+        .message-modal.error .message-modal-header {
+            background: linear-gradient(135deg, #f44336 0%, #d32f2f 100%);
+            color: white;
+            border-radius: 8px 8px 0 0;
+        }
+
+        .message-modal.info .message-modal-header {
+            background: linear-gradient(135deg, #2196f3 0%, #1976d2 100%);
+            color: white;
+            border-radius: 8px 8px 0 0;
+        }
+
+        .message-modal-header h3 {
+            margin: 0;
+            font-size: 20px;
+            font-weight: 600;
+        }
+
+        .message-modal-close {
+            background: none;
+            border: none;
+            font-size: 28px;
+            cursor: pointer;
+            color: inherit;
+            opacity: 0.8;
+            transition: opacity 0.2s;
+            padding: 0;
+            width: 32px;
+            height: 32px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .message-modal-close:hover {
+            opacity: 1;
+        }
+
+        .message-modal-body {
+            padding: 24px;
+            overflow-y: auto;
+            line-height: 1.6;
+            color: #333;
+            font-size: 14px;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
+        .message-modal-footer {
+            padding: 16px 24px;
+            border-top: 1px solid #e0e0e0;
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+        }
+
+        .message-modal-btn {
+            padding: 10px 24px;
+            border: none;
+            border-radius: 4px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+            background-color: #4285f4;
+            color: white;
+        }
+
+        .message-modal-btn:hover {
+            background-color: #3367d6;
+            transform: translateY(-1px);
+            box-shadow: 0 2px 8px rgba(66, 133, 244, 0.3);
+        }
+
+        /* 消息中的链接样式 */
+        .message-link {
+            color: #1976d2;
+            text-decoration: none;
+            font-weight: 500;
+            padding: 2px 4px;
+            border-radius: 3px;
+            background-color: rgba(25, 118, 210, 0.1);
+            transition: all 0.2s;
+            display: inline-block;
+            word-break: break-all;
+        }
+
+        .message-link:hover {
+            background-color: rgba(25, 118, 210, 0.2);
+            text-decoration: underline;
+            transform: translateY(-1px);
+        }
+
+        .message-link:active {
+            transform: translateY(0);
+        }
+
+        /* 移动端适配 */
+        @media (max-width: 768px) {
+            .message-modal {
+                max-width: 95%;
+                max-height: 90vh;
+            }
+
+            .message-modal-header {
+                padding: 16px 20px;
+            }
+
+            .message-modal-body {
+                padding: 20px;
+                font-size: 13px;
+            }
+
+            .message-modal-footer {
+                padding: 12px 20px;
+            }
+        }
     </style>
 </head>
 
@@ -1485,6 +1664,12 @@
                         <strong style="color: #0c5460;">✅ 检验成功可以恢复403错误</strong>，让凭证重新正常工作。<br>
                         建议在遇到403错误时使用此功能。
                     </p>
+                    <strong>💡 设置预览功能说明：</strong>
+                    <p style="margin: 10px 0;">
+                        点击每个凭证的"设置预览"按钮可以配置Preview通道。<br>
+                        <strong style="color: #0c5460;">✅ 设置预览可以解决部分凭证调用preview模型时404的问题</strong>。<br>
+                        建议在调用gemini-3-pro-preview等模型遇到404错误时使用此功能。
+                    </p>
                 </div>
 
                 <!-- 状态统计 -->
@@ -1526,6 +1711,8 @@
                             disabled>批量删除</button>
                         <button class="batch-btn" style="background-color: #ff9800;" id="batchVerifyBtn"
                             onclick="batchVerifyProjectIds()" disabled>批量检验</button>
+                        <button class="batch-btn" style="background-color: #9c27b0;" id="batchPreviewBtn"
+                            onclick="batchConfigurePreview()" disabled>批量设置预览</button>
                         <button class="batch-btn batch-email" onclick="refreshAllEmails()">刷新所有邮箱</button>
                         <button class="batch-btn" style="background-color: #e91e63;"
                             onclick="deduplicateByEmail()">凭证一键去重</button>
@@ -1555,6 +1742,13 @@
                         <option value="all">全部</option>
                         <option value="in_cooldown">CD中</option>
                         <option value="no_cooldown">未CD</option>
+                    </select>
+
+                    <label for="previewFilter" style="margin-left: 20px;">Preview：</label>
+                    <select id="previewFilter" class="filter-select" onchange="applyStatusFilter()">
+                        <option value="all">全部</option>
+                        <option value="preview">支持</option>
+                        <option value="no_preview">不支持</option>
                     </select>
 
                     <label for="pageSizeSelect" style="margin-left: 20px;">每页显示：</label>

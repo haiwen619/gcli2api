@@ -146,7 +146,7 @@ async def record_api_call_success(
     credential_manager: CredentialManager,
     credential_name: str,
     mode: str = "geminicli",
-    model_key: Optional[str] = None
+    model_name: Optional[str] = None
 ) -> None:
     """
     记录API调用成功
@@ -155,11 +155,11 @@ async def record_api_call_success(
         credential_manager: 凭证管理器实例
         credential_name: 凭证名称
         mode: 模式（geminicli 或 antigravity）
-        model_key: 模型键（用于模型级CD）
+        model_name: 模型名称（用于模型级CD）
     """
     if credential_manager and credential_name:
         await credential_manager.record_api_call_result(
-            credential_name, True, mode=mode, model_key=model_key
+            credential_name, True, mode=mode, model_name=model_name
         )
 
 
@@ -169,18 +169,20 @@ async def record_api_call_error(
     status_code: int,
     cooldown_until: Optional[float] = None,
     mode: str = "geminicli",
-    model_key: Optional[str] = None
+    model_name: Optional[str] = None,
+    error_message: Optional[str] = None
 ) -> None:
     """
     记录API调用错误
-    
+
     Args:
         credential_manager: 凭证管理器实例
         credential_name: 凭证名称
         status_code: HTTP状态码
         cooldown_until: 冷却截止时间（Unix时间戳）
         mode: 模式（geminicli 或 antigravity）
-        model_key: 模型键（用于模型级CD）
+        model_name: 模型名称（用于模型级CD）
+        error_message: 错误信息（可选）
     """
     if credential_manager and credential_name:
         await credential_manager.record_api_call_result(
@@ -189,7 +191,8 @@ async def record_api_call_error(
             status_code,
             cooldown_until=cooldown_until,
             mode=mode,
-            model_key=model_key
+            model_name=model_name,
+            error_message=error_message
         )
 
 
@@ -262,7 +265,8 @@ async def collect_streaming_response(stream_generator) -> Response:
 
     collected_text = []  # 用于收集文本内容
     collected_thought_text = []  # 用于收集思维链内容
-    collected_other_parts = []  # 用于收集其他类型的parts（图片、文件等）
+    collected_other_parts = []  # 用于收集其他类型的parts（图片、文件、工具调用等）
+    collected_tool_parts_count = 0  # 记录工具调用相关part数量
     has_data = False
     line_count = 0
 
@@ -325,6 +329,14 @@ async def collect_streaming_response(stream_generator) -> Response:
 
                 for part in parts:
                     if not isinstance(part, dict):
+                        continue
+
+                    # 优先保留工具调用相关 part（functionCall / functionResponse）
+                    # 避免在 stream2nostream 模式下工具调用丢失
+                    if "functionCall" in part or "functionResponse" in part or "function_call" in part:
+                        collected_other_parts.append(part)
+                        collected_tool_parts_count += 1
+                        log.debug(f"[STREAM COLLECTOR] Collected tool part: {list(part.keys())}")
                         continue
 
                     # 处理文本内容
@@ -408,7 +420,11 @@ async def collect_streaming_response(stream_generator) -> Response:
 
     merged_response["response"]["candidates"][0]["content"]["parts"] = final_parts
 
-    log.info(f"[STREAM COLLECTOR] Collected {len(collected_text)} text chunks, {len(collected_thought_text)} thought chunks, and {len(collected_other_parts)} other parts")
+    log.info(
+        f"[STREAM COLLECTOR] Collected {len(collected_text)} text chunks, "
+        f"{len(collected_thought_text)} thought chunks, {len(collected_other_parts)} other parts "
+        f"(tool parts: {collected_tool_parts_count})"
+    )
 
     # 去掉嵌套的 "response" 包装（Antigravity格式 -> 标准Gemini格式）
     if "response" in merged_response and "candidates" not in merged_response:
@@ -474,25 +490,3 @@ def parse_quota_reset_timestamp(error_response: dict) -> Optional[float]:
 
     except Exception:
         return None
-
-def get_model_group(model_name: str) -> str:
-    """
-    获取模型组，用于 GCLI CD 机制。
-
-    Args:
-        model_name: 模型名称
-
-    Returns:
-        "pro" 或 "flash"
-
-    说明:
-        - pro 组: gemini-2.5-pro, gemini-3-pro-preview 共享额度
-        - flash 组: gemini-2.5-flash 单独额度
-    """
-
-    # 判断模型组
-    if "flash" in model_name.lower():
-        return "flash"
-    else:
-        # pro 模型（包括 gemini-2.5-pro 和 gemini-3-pro-preview）
-        return "pro"

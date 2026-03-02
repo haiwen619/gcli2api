@@ -1,4 +1,4 @@
-full_hash=5cb68349f003978398add8e9d364df5eef9b6fd1
-short_hash=5cb6834
-message=Update anti_truncation.py
-date=2026-02-25 17:34:45 +0800
+full_hash=43e82b5fbd4930dcc96cd02205b032df16cf70ec
+short_hash=43e82b5
+message=Merge pull request #347 from afu6609/fix/clean-schema-claude-patternProperties
+date=2026-02-28 15:39:48 +0800

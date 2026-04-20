@@ -8,7 +8,7 @@ import json
 import os
 import time
 import zipfile
-from typing import List
+from typing import Any, List
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, Response
 from fastapi.responses import JSONResponse
@@ -22,8 +22,8 @@ from src.models import (
 from src.storage_adapter import get_storage_adapter
 from src.utils import verify_panel_token, GEMINICLI_USER_AGENT, ANTIGRAVITY_USER_AGENT
 from src.api.antigravity import fetch_quota_info
-from src.google_oauth_api import Credentials, fetch_project_id
-from config import get_code_assist_endpoint, get_antigravity_api_url
+from src.google_oauth_api import Credentials, fetch_project_id_and_tier
+from config import get_code_assist_endpoint
 from .utils import validate_mode
 
 
@@ -86,6 +86,20 @@ async def extract_json_files_from_zip(zip_file: UploadFile) -> List[dict]:
     except Exception as e:
         log.error(f"处理ZIP文件失败: {e}")
         raise HTTPException(status_code=500, detail=f"处理ZIP文件失败: {str(e)}")
+
+
+async def clear_all_model_cooldowns_for_credential(
+    storage_adapter: Any,
+    filename: str,
+    mode: str,
+) -> None:
+    """清空指定凭证的所有模型冷却（后端支持时执行）。"""
+    try:
+        cleared = await storage_adapter._backend.clear_all_model_cooldowns(filename, mode=mode)
+        if not cleared:
+            log.warning(f"清空模型CD失败或凭证不存在: {filename} (mode={mode})")
+    except Exception as e:
+        log.warning(f"清空模型CD时出错: {filename} (mode={mode}), error={e}")
 
 
 async def upload_credentials_common(
@@ -218,7 +232,7 @@ async def upload_credentials_common(
 
 async def get_creds_status_common(
     offset: int, limit: int, status_filter: str, mode: str = "geminicli",
-    error_code_filter: str = None, cooldown_filter: str = None, preview_filter: str = None
+    error_code_filter: str = None, cooldown_filter: str = None, preview_filter: str = None, tier_filter: str = None
 ) -> JSONResponse:
     """获取凭证文件状态的通用函数"""
     mode = validate_mode(mode)
@@ -233,6 +247,8 @@ async def get_creds_status_common(
         raise HTTPException(status_code=400, detail="cooldown_filter 只能是 all、in_cooldown 或 no_cooldown")
     if preview_filter and preview_filter not in ["all", "preview", "no_preview"]:
         raise HTTPException(status_code=400, detail="preview_filter 只能是 all、preview 或 no_preview")
+    if tier_filter and tier_filter not in ["all", "free", "pro", "ultra"]:
+        raise HTTPException(status_code=400, detail="tier_filter 只能是 all、free、pro 或 ultra")
 
 
 
@@ -248,7 +264,8 @@ async def get_creds_status_common(
         mode=mode,
         error_code_filter=error_code_filter if error_code_filter and error_code_filter != "all" else None,
         cooldown_filter=cooldown_filter if cooldown_filter and cooldown_filter != "all" else None,
-        preview_filter=preview_filter if preview_filter and preview_filter != "all" else None
+        preview_filter=preview_filter if preview_filter and preview_filter != "all" else None,
+        tier_filter=tier_filter if tier_filter and tier_filter != "all" else None
     )
 
     creds_list = []
@@ -261,11 +278,13 @@ async def get_creds_status_common(
             "last_success": summary["last_success"],
             "backend_type": backend_type,
             "model_cooldowns": summary.get("model_cooldowns", {}),
+            "tier": summary.get("tier", "pro"),
         }
 
-        # 只对 geminicli 模式添加 preview 字段
         if mode == "geminicli":
             cred_info["preview"] = summary.get("preview", True)
+        else:
+            cred_info["enable_credit"] = summary.get("enable_credit", False)
 
         creds_list.append(cred_info)
 
@@ -540,22 +559,32 @@ async def verify_credential_project_common(filename: str, mode: str = "geminicli
 
     # 获取API端点和对应的User-Agent
     if mode == "antigravity":
-        api_base_url = await get_antigravity_api_url()
+        api_base_url = await get_code_assist_endpoint()
         user_agent = ANTIGRAVITY_USER_AGENT
     else:
         api_base_url = await get_code_assist_endpoint()
         user_agent = GEMINICLI_USER_AGENT
 
-    # 重新获取project id
-    project_id = await fetch_project_id(
-        access_token=credentials.access_token,
-        user_agent=user_agent,
-        api_base_url=api_base_url
-    )
+    # 重新获取project id（仅 antigravity 模式请求积分）
+    if mode == "antigravity":
+        project_id, subscription_tier, credit_amount = await fetch_project_id_and_tier(
+            access_token=credentials.access_token,
+            user_agent=user_agent,
+            api_base_url=api_base_url,
+            include_credits=True,
+        )
+    else:
+        project_id, subscription_tier = await fetch_project_id_and_tier(
+            access_token=credentials.access_token,
+            user_agent=user_agent,
+            api_base_url=api_base_url,
+        )
+        credit_amount = None
 
     if project_id:
-        # 更新凭证数据中的project_id
         credential_data["project_id"] = project_id
+
+    if project_id or subscription_tier:
         await storage_adapter.store_credential(filename, credential_data, mode=mode)
 
         # 检验成功后自动解除禁用状态并清除错误码
@@ -564,20 +593,29 @@ async def verify_credential_project_common(filename: str, mode: str = "geminicli
             "error_codes": []
         }
 
+        # 同步更新状态表中的 tier 字段
+        state_update["tier"] = subscription_tier
+
         # 如果是 geminicli 模式，直接设置 preview=True
         if mode == "geminicli":
             state_update["preview"] = True
 
         await storage_adapter.update_credential_state(filename, state_update, mode=mode)
 
-        log.info(f"检验 {mode} 凭证成功: {filename} - Project ID: {project_id} - 已解除禁用并清除错误码")
+        log.info(f"检验 {mode} 凭证成功: {filename} - Project ID: {project_id}, Tier: {subscription_tier} - 已解除禁用并清除错误码")
 
-        return JSONResponse(content={
+        response_data = {
             "success": True,
             "filename": filename,
             "project_id": project_id,
+            "subscription_tier": subscription_tier,
             "message": "检验成功！Project ID已更新，已解除禁用状态并清除错误码，403错误应该已恢复"
-        })
+        }
+
+        if mode == "antigravity" and credit_amount is not None:
+            response_data["credit_amount"] = credit_amount
+
+        return JSONResponse(content=response_data)
     else:
         return JSONResponse(
             status_code=400,
@@ -620,6 +658,7 @@ async def get_creds_status(
     error_code_filter: str = "all",
     cooldown_filter: str = "all",
     preview_filter: str = "all",
+    tier_filter: str = "all",
     mode: str = "geminicli"
 ):
     """
@@ -632,6 +671,7 @@ async def get_creds_status(
         error_code_filter: 错误码筛选（all=全部, 或具体错误码如"400", "403"）
         cooldown_filter: 冷却状态筛选（all=全部, in_cooldown=冷却中, no_cooldown=未冷却）
         preview_filter: Preview筛选（all=全部, preview=支持preview, no_preview=不支持preview，仅geminicli模式有效）
+        tier_filter: tier筛选（all=全部, free/pro/ultra）
         mode: 凭证模式（geminicli 或 antigravity）
 
     Returns:
@@ -643,7 +683,8 @@ async def get_creds_status(
             offset, limit, status_filter, mode=mode,
             error_code_filter=error_code_filter,
             cooldown_filter=cooldown_filter,
-            preview_filter=preview_filter
+            preview_filter=preview_filter,
+            tier_filter=tier_filter
         )
     except HTTPException:
         raise
@@ -698,9 +739,10 @@ async def get_cred_detail(
             "model_cooldowns": file_status.get("model_cooldowns", {}),
         }
 
-        # 只对 geminicli 模式添加 preview 字段
         if mode == "geminicli":
             result["preview"] = file_status.get("preview", True)
+        else:
+            result["enable_credit"] = file_status.get("enable_credit", False)
 
         if backend_type == "file" and os.path.exists(filename):
             result.update({
@@ -723,7 +765,7 @@ async def creds_action(
     token: str = Depends(verify_panel_token),
     mode: str = "geminicli"
 ):
-    """对凭证文件执行操作（启用/禁用/删除）"""
+    """对凭证文件执行操作（启用/禁用/删除/enable_credit开关）"""
     try:
         mode = validate_mode(mode)
 
@@ -788,6 +830,28 @@ async def creds_action(
                 log.error(f"删除凭证 {filename} 时出错: {e}")
                 raise HTTPException(status_code=500, detail=f"删除文件失败: {str(e)}")
 
+        elif action == "enable_credit":
+            if mode != "antigravity":
+                raise HTTPException(status_code=400, detail="enable_credit 仅支持 antigravity 模式")
+            updated = await storage_adapter.update_credential_state(
+                filename, {"enable_credit": True}, mode=mode
+            )
+            if updated:
+                await clear_all_model_cooldowns_for_credential(storage_adapter, filename, mode)
+                return JSONResponse(content={"message": f"已开启凭证信用额度模式 {os.path.basename(filename)}"})
+            raise HTTPException(status_code=500, detail="开启信用额度模式失败，可能凭证不存在")
+
+        elif action == "disable_credit":
+            if mode != "antigravity":
+                raise HTTPException(status_code=400, detail="disable_credit 仅支持 antigravity 模式")
+            updated = await storage_adapter.update_credential_state(
+                filename, {"enable_credit": False}, mode=mode
+            )
+            if updated:
+                await clear_all_model_cooldowns_for_credential(storage_adapter, filename, mode)
+                return JSONResponse(content={"message": f"已关闭凭证信用额度模式 {os.path.basename(filename)}"})
+            raise HTTPException(status_code=500, detail="关闭信用额度模式失败，可能凭证不存在")
+
         else:
             raise HTTPException(status_code=400, detail="无效的操作类型")
 
@@ -804,7 +868,7 @@ async def creds_batch_action(
     token: str = Depends(verify_panel_token),
     mode: str = "geminicli"
 ):
-    """批量对凭证文件执行操作（启用/禁用/删除）"""
+    """批量对凭证文件执行操作（启用/禁用/删除/enable_credit开关）"""
     try:
         mode = validate_mode(mode)
 
@@ -856,6 +920,32 @@ async def creds_batch_action(
                             continue
                     except Exception as e:
                         errors.append(f"{filename}: 删除文件失败 - {str(e)}")
+                        continue
+                elif action == "enable_credit":
+                    if mode != "antigravity":
+                        errors.append(f"{filename}: enable_credit 仅支持 antigravity 模式")
+                        continue
+                    updated = await storage_adapter.update_credential_state(
+                        filename, {"enable_credit": True}, mode=mode
+                    )
+                    if updated:
+                        await clear_all_model_cooldowns_for_credential(storage_adapter, filename, mode)
+                        success_count += 1
+                    else:
+                        errors.append(f"{filename}: 开启信用额度模式失败")
+                        continue
+                elif action == "disable_credit":
+                    if mode != "antigravity":
+                        errors.append(f"{filename}: disable_credit 仅支持 antigravity 模式")
+                        continue
+                    updated = await storage_adapter.update_credential_state(
+                        filename, {"enable_credit": False}, mode=mode
+                    )
+                    if updated:
+                        await clear_all_model_cooldowns_for_credential(storage_adapter, filename, mode)
+                        success_count += 1
+                    else:
+                        errors.append(f"{filename}: 关闭信用额度模式失败")
                         continue
                 else:
                     errors.append(f"{filename}: 无效的操作类型")
@@ -1132,8 +1222,7 @@ async def configure_preview_channel(
     """
     为 geminicli 凭证配置 preview 通道
 
-    通过调用 Google Cloud API 设置 release_channel 为 EXPERIMENTAL,
-    配置成功后将 preview 属性设置为 true
+    通过调用 Google Cloud API 设置 release_channel 为 EXPERIMENTAL
 
     Args:
         filename: 凭证文件名
@@ -1250,7 +1339,6 @@ async def configure_preview_channel(
         binding_status = binding_response.status_code
 
         if binding_status == 200 or binding_status == 201:
-            # 配置成功，设置 preview=True
             await storage_adapter.update_credential_state(filename, {
                 "preview": True
             }, mode=mode)
@@ -1365,7 +1453,7 @@ async def test_credential(
         test_model = "gemini-2.5-flash"
 
         if mode == "antigravity":
-            api_base_url = await get_antigravity_api_url()
+            api_base_url = await get_code_assist_endpoint()
             from src.api.antigravity import build_antigravity_headers
             headers = build_antigravity_headers(access_token, test_model)
         else:

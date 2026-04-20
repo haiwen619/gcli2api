@@ -58,6 +58,7 @@ function createCredsManager(type) {
         currentErrorCodeFilter: 'all',
         currentCooldownFilter: 'all',
         currentPreviewFilter: 'all',
+        currentTierFilter: 'all',
         statsData: { total: 0, normal: 0, disabled: 0 },
 
         // API端点
@@ -104,8 +105,9 @@ function createCredsManager(type) {
                 const errorCodeFilter = this.currentErrorCodeFilter || 'all';
                 const cooldownFilter = this.currentCooldownFilter || 'all';
                 const previewFilter = this.currentPreviewFilter || 'all';
+                const tierFilter = this.currentTierFilter || 'all';
                 const response = await fetch(
-                    `${this.getEndpoint('status')}?offset=${offset}&limit=${this.pageSize}&status_filter=${this.currentStatusFilter}&error_code_filter=${errorCodeFilter}&cooldown_filter=${cooldownFilter}&preview_filter=${previewFilter}&${this.getModeParam()}`,
+                    `${this.getEndpoint('status')}?offset=${offset}&limit=${this.pageSize}&status_filter=${this.currentStatusFilter}&error_code_filter=${errorCodeFilter}&cooldown_filter=${cooldownFilter}&preview_filter=${previewFilter}&tier_filter=${tierFilter}&${this.getModeParam()}`,
                     { headers: getAuthHeaders() }
                 );
 
@@ -123,7 +125,9 @@ function createCredsManager(type) {
                             },
                             user_email: item.user_email,
                             model_cooldowns: item.model_cooldowns || {},
-                            preview: item.preview  // 保存preview字段
+                            preview: item.preview,
+                            tier: item.tier || 'pro',
+                            enable_credit: !!item.enable_credit
                         };
                     });
 
@@ -237,9 +241,11 @@ function createCredsManager(type) {
             const errorCodeFilterEl = document.getElementById(this.getElementId('ErrorCodeFilter'));
             const cooldownFilterEl = document.getElementById(this.getElementId('CooldownFilter'));
             const previewFilterEl = document.getElementById(this.getElementId('PreviewFilter'));
+            const tierFilterEl = document.getElementById(this.getElementId('TierFilter'));
             this.currentErrorCodeFilter = errorCodeFilterEl ? errorCodeFilterEl.value : 'all';
             this.currentCooldownFilter = cooldownFilterEl ? cooldownFilterEl.value : 'all';
             this.currentPreviewFilter = previewFilterEl ? previewFilterEl.value : 'all';
+            this.currentTierFilter = tierFilterEl ? tierFilterEl.value : 'all';
             this.currentPage = 1;
             this.refresh();
         },
@@ -249,7 +255,12 @@ function createCredsManager(type) {
             const selectedCount = this.selectedFiles.size;
             document.getElementById(this.getElementId('SelectedCount')).textContent = `已选择 ${selectedCount} 项`;
 
-            const batchBtns = ['Enable', 'Disable', 'Delete', 'Verify', 'Preview'].map(action =>
+            const batchBtnNames = ['Enable', 'Disable', 'Delete', 'Verify', 'Preview'];
+            if (this.type === 'antigravity') {
+                batchBtnNames.push('EnableCredit');
+                batchBtnNames.push('DisableCredit');
+            }
+            const batchBtns = batchBtnNames.map(action =>
                 document.getElementById(this.getElementId(`Batch${action}Btn`))
             );
             batchBtns.forEach(btn => btn && (btn.disabled = selectedCount === 0));
@@ -307,15 +318,22 @@ function createCredsManager(type) {
                 return;
             }
 
-            const actionNames = { enable: '启用', disable: '禁用', delete: '删除' };
+            const actionNames = {
+                enable: '启用',
+                disable: '禁用',
+                delete: '删除',
+                enable_credit: '开启积分',
+                disable_credit: '关闭积分'
+            };
+            const actionLabel = actionNames[action] || action;
             const confirmMsg = action === 'delete'
                 ? `确定要删除选中的 ${selectedFiles.length} 个文件吗？\n注意：此操作不可恢复！`
-                : `确定要${actionNames[action]}选中的 ${selectedFiles.length} 个文件吗？`;
+                : `确定要${actionLabel}选中的 ${selectedFiles.length} 个文件吗？`;
 
             if (!confirm(confirmMsg)) return;
 
             try {
-                showStatus(`正在执行批量${actionNames[action]}操作...`, 'info');
+                showStatus(`正在执行批量${actionLabel}操作...`, 'info');
 
                 const response = await fetch(`${this.getEndpoint('batchAction')}?${this.getModeParam()}`, {
                     method: 'POST',
@@ -639,9 +657,24 @@ function createCredCard(credInfo, manager) {
     // Preview状态显示 (仅对geminicli模式显示)
     if (managerType !== 'antigravity' && credInfo.preview !== undefined) {
         if (credInfo.preview) {
-            statusBadges += '<span class="status-badge" style="background-color: #9c27b0; color: white;" title="该凭证支持Preview模型">🔬 Preview</span>';
+            statusBadges += '<span class="status-badge" style="background-color: #28a745; color: white;" title="该凭证支持Preview模型">Preview: ON</span>';
         } else {
-            statusBadges += '<span class="status-badge" style="background-color: #607d8b; color: white;" title="该凭证不支持Preview模型">❌ Preview</span>';
+            statusBadges += '<span class="status-badge" style="background-color: #8aa5a2; color: white;" title="该凭证不支持Preview模型">Preview: OFF</span>';
+        }
+    }
+
+    // tier 状态显示 (geminicli 和 antigravity 都显示)
+    const tier = (credInfo.tier || 'pro').toString().toLowerCase();
+    const tierLabel = tier.toUpperCase();
+    const tierColor = tier === 'ultra' ? '#ff9800' : (tier === 'free' ? '#607d8b' : '#2e7d32');
+    statusBadges += `<span class="status-badge" style="background-color: ${tierColor}; color: white;" title="凭证等级: ${tierLabel}">Tier: ${tierLabel}</span>`;
+
+    // Credit 状态显示（仅 antigravity）
+    if (managerType === 'antigravity') {
+        if (credInfo.enable_credit) {
+            statusBadges += '<span class="status-badge" style="background-color: #2e7d32; color: white;" title="当前已开启Credit模式">Credit: ON</span>';
+        } else {
+            statusBadges += '<span class="status-badge" style="background-color: #616161; color: white;" title="当前已关闭Credit模式">Credit: OFF</span>';
         }
     }
 
@@ -663,7 +696,7 @@ function createCredCard(credInfo, manager) {
 
         if (activeCooldowns.length > 0) {
             activeCooldowns.slice(0, 2).forEach(item => {
-                statusBadges += `<span class="cooldown-badge" style="background-color: #17a2b8;" title="模型: ${item.fullModel}">🔧 ${item.model}: ${item.time}</span>`;
+                statusBadges += `<span class="cooldown-badge" style="background-color: #17a2b8;" title="模型: ${item.fullModel}">⏰ ${item.model}: ${item.time}</span>`;
             });
             if (activeCooldowns.length > 2) {
                 const remaining = activeCooldowns.length - 2;
@@ -685,11 +718,15 @@ function createCredCard(credInfo, manager) {
         <button class="cred-btn view" onclick="toggle${managerType === 'antigravity' ? 'Antigravity' : ''}CredDetails('${pathId}')">查看内容</button>
         <button class="cred-btn download" onclick="download${managerType === 'antigravity' ? 'Antigravity' : ''}Cred('${filename}')">下载</button>
         <button class="cred-btn email" onclick="fetch${managerType === 'antigravity' ? 'Antigravity' : ''}UserEmail('${filename}')">查看账号邮箱</button>
-        ${managerType === 'antigravity' ? `<button class="cred-btn" style="background-color: #17a2b8;" onclick="toggleAntigravityQuotaDetails('${pathId}')" title="查看该凭证的额度信息">查看额度</button>` : ''}
-        ${managerType !== 'antigravity' ? `<button class="cred-btn" style="background-color: #00bcd4;" onclick="configurePreviewChannel('${filename}')" title="配置Preview通道，启用实验性功能">设置预览</button>` : ''}
-        <button class="cred-btn" style="background-color: #ff9800;" onclick="verify${managerType === 'antigravity' ? 'Antigravity' : ''}ProjectId('${filename}')" title="重新获取Project ID，可恢复403错误">检验</button>
-        <button class="cred-btn" style="background-color: #9c27b0;" onclick="test${managerType === 'antigravity' ? 'Antigravity' : ''}Credential('${filename}')" title="测试凭证是否可用">消息测试</button>
-        <button class="cred-btn" style="background-color: #e91e63;" onclick="toggle${managerType === 'antigravity' ? 'Antigravity' : ''}ErrorDetails('${pathId}')" title="查看该凭证的详细报错信息">查看报错</button>
+        ${managerType === 'antigravity' ? `<button class="cred-btn" onclick="toggleAntigravityQuotaDetails('${pathId}')" title="查看该凭证的额度信息">查看额度</button>` : ''}
+        ${managerType === 'antigravity' ? (credInfo.enable_credit
+            ? `<button class="cred-btn" data-filename="${filename}" data-action="disable_credit" title="关闭该凭证的Credit模式">关闭 Credit</button>`
+            : `<button class="cred-btn" data-filename="${filename}" data-action="enable_credit" title="开启该凭证的Credit模式">开启 Credit</button>`
+        ) : ''}
+        ${managerType !== 'antigravity' ? `<button class="cred-btn" onclick="configurePreviewChannel('${filename}')" title="配置Preview通道，启用实验性功能">设置预览</button>` : ''}
+        <button class="cred-btn" onclick="verify${managerType === 'antigravity' ? 'Antigravity' : ''}ProjectId('${filename}')" title="重新获取Project ID，可恢复403错误">检验</button>
+        <button class="cred-btn" onclick="test${managerType === 'antigravity' ? 'Antigravity' : ''}Credential('${filename}')" title="测试凭证是否可用">消息测试</button>
+        <button class="cred-btn" onclick="toggle${managerType === 'antigravity' ? 'Antigravity' : ''}ErrorDetails('${pathId}')" title="查看该凭证的详细报错信息">查看报错</button>
         <button class="cred-btn delete" data-filename="${filename}" data-action="delete">删除</button>
     `;
 
@@ -1577,11 +1614,15 @@ async function verifyProjectId(filename) {
 
         if (response.ok && data.success) {
             // 成功时显示绿色成功消息和Project ID
-            const successMsg = `✅ 检验成功！\n文件: ${filename}\nProject ID: ${data.project_id}\n\n${data.message}`;
+            const tierLine = data.subscription_tier ? `\nTier: ${data.subscription_tier}` : '';
+            const creditLine = data.credit_amount !== undefined && data.credit_amount !== null
+                ? `\n积分: ${data.credit_amount}`
+                : '';
+            const successMsg = `✅ 检验成功！\n文件: ${filename}\nProject ID: ${data.project_id}${tierLine}${creditLine}\n\n${data.message}`;
             showStatus(successMsg.replace(/\n/g, '<br>'), 'success');
 
             // 弹出成功提示
-            showMessageModal('检验成功', `✅ 检验成功！\n\n文件: ${filename}\nProject ID: ${data.project_id}\n\n${data.message}`, 'success');
+            showMessageModal('检验成功', `✅ 检验成功！\n\n文件: ${filename}\nProject ID: ${data.project_id}${tierLine}${creditLine}\n\n${data.message}`, 'success');
 
             await AppState.creds.refresh();
         } else {
@@ -1610,11 +1651,15 @@ async function verifyAntigravityProjectId(filename) {
 
         if (response.ok && data.success) {
             // 成功时显示绿色成功消息和Project ID
-            const successMsg = `✅ 检验成功！\n文件: ${filename}\nProject ID: ${data.project_id}\n\n${data.message}`;
+            const tierLine = data.subscription_tier ? `\nTier: ${data.subscription_tier}` : '';
+            const creditLine = data.credit_amount !== undefined && data.credit_amount !== null
+                ? `\n积分: ${data.credit_amount}`
+                : '';
+            const successMsg = `✅ 检验成功！\n文件: ${filename}\nProject ID: ${data.project_id}${tierLine}${creditLine}\n\n${data.message}`;
             showStatus(successMsg.replace(/\n/g, '<br>'), 'success');
 
             // 弹出成功提示
-            showMessageModal('检验成功', `✅ Antigravity检验成功！\n\n文件: ${filename}\nProject ID: ${data.project_id}\n\n${data.message}`, 'success');
+            showMessageModal('检验成功', `✅ Antigravity检验成功！\n\n文件: ${filename}\nProject ID: ${data.project_id}${tierLine}${creditLine}\n\n${data.message}`, 'success');
 
             await AppState.antigravityCreds.refresh();
         } else {
@@ -1643,7 +1688,7 @@ async function testCredential(filename) {
         // 解析JSON响应
         const data = await response.json();
 
-        if (response.status === 200 || response.status === 429) {
+        if (response.status === 200) {
             // 凭证可用
             const successMsg = `✅ 测试成功！\n文件: ${filename}\n状态: ${data.message || '凭证可用'} (${data.status_code || 200})`;
             showStatus('✅ 测试成功！', 'success');
@@ -1691,7 +1736,7 @@ async function testAntigravityCredential(filename) {
         // 解析JSON响应
         const data = await response.json();
 
-        if (response.status === 200 || response.status === 429) {
+        if (response.status === 200) {
             // 凭证可用
             const successMsg = `✅ 测试成功！\n文件: ${filename}\n状态: ${data.message || 'Antigravity凭证可用'} (${data.status_code || 200})`;
             showStatus('✅ 测试成功！', 'success');
@@ -2087,7 +2132,13 @@ async function batchVerifyProjectIds() {
             const data = await response.json();
 
             if (response.ok && data.success) {
-                return { success: true, filename, projectId: data.project_id, message: data.message };
+                return {
+                    success: true,
+                    filename,
+                    projectId: data.project_id,
+                    creditAmount: data.credit_amount,
+                    message: data.message
+                };
             } else {
                 return { success: false, filename, error: data.message || '失败' };
             }
@@ -2107,7 +2158,10 @@ async function batchVerifyProjectIds() {
     results.forEach(result => {
         if (result.success) {
             successCount++;
-            resultMessages.push(`✅ ${result.filename}: ${result.projectId}`);
+            const creditSuffix = result.creditAmount !== undefined && result.creditAmount !== null
+                ? ` (积分: ${result.creditAmount})`
+                : '';
+            resultMessages.push(`✅ ${result.filename}: ${result.projectId}${creditSuffix}`);
         } else {
             failCount++;
             resultMessages.push(`❌ ${result.filename}: ${result.error}`);
@@ -2156,7 +2210,13 @@ async function batchVerifyAntigravityProjectIds() {
             const data = await response.json();
 
             if (response.ok && data.success) {
-                return { success: true, filename, projectId: data.project_id, message: data.message };
+                return {
+                    success: true,
+                    filename,
+                    projectId: data.project_id,
+                    creditAmount: data.credit_amount,
+                    message: data.message
+                };
             } else {
                 return { success: false, filename, error: data.message || '失败' };
             }
@@ -2176,7 +2236,10 @@ async function batchVerifyAntigravityProjectIds() {
     results.forEach(result => {
         if (result.success) {
             successCount++;
-            resultMessages.push(`✅ ${result.filename}: ${result.projectId}`);
+            const creditSuffix = result.creditAmount !== undefined && result.creditAmount !== null
+                ? ` (积分: ${result.creditAmount})`
+                : '';
+            resultMessages.push(`✅ ${result.filename}: ${result.projectId}${creditSuffix}`);
         } else {
             failCount++;
             resultMessages.push(`❌ ${result.filename}: ${result.error}`);
@@ -2680,7 +2743,6 @@ function populateConfigForm() {
     setConfigField('googleapisProxyUrl', c.googleapis_proxy_url || '');
     setConfigField('resourceManagerApiUrl', c.resource_manager_api_url || '');
     setConfigField('serviceUsageApiUrl', c.service_usage_api_url || '');
-    setConfigField('antigravityApiUrl', c.antigravity_api_url || '');
 
     document.getElementById('autoBanEnabled').checked = Boolean(c.auto_ban_enabled);
     setConfigField('autoBanErrorCodes', (c.auto_ban_error_codes || []).join(','));
@@ -2735,7 +2797,6 @@ async function saveConfig() {
             googleapis_proxy_url: getValue('googleapisProxyUrl'),
             resource_manager_api_url: getValue('resourceManagerApiUrl'),
             service_usage_api_url: getValue('serviceUsageApiUrl'),
-            antigravity_api_url: getValue('antigravityApiUrl'),
             auto_ban_enabled: getChecked('autoBanEnabled'),
             auto_ban_error_codes: getValue('autoBanErrorCodes').split(',')
                 .map(c => parseInt(c.trim())).filter(c => !isNaN(c)),
@@ -2788,8 +2849,7 @@ const mirrorUrls = {
     oauthProxyUrl: 'https://gcli-api.sukaka.top/oauth2',
     googleapisProxyUrl: 'https://gcli-api.sukaka.top/googleapis',
     resourceManagerApiUrl: 'https://gcli-api.sukaka.top/cloudresourcemanager',
-    serviceUsageApiUrl: 'https://gcli-api.sukaka.top/serviceusage',
-    antigravityApiUrl: 'https://gcli-api.sukaka.top/daily-cloudcode-pa'
+    serviceUsageApiUrl: 'https://gcli-api.sukaka.top/serviceusage'
 };
 
 const officialUrls = {
@@ -2797,8 +2857,7 @@ const officialUrls = {
     oauthProxyUrl: 'https://oauth2.googleapis.com',
     googleapisProxyUrl: 'https://www.googleapis.com',
     resourceManagerApiUrl: 'https://cloudresourcemanager.googleapis.com',
-    serviceUsageApiUrl: 'https://serviceusage.googleapis.com',
-    antigravityApiUrl: 'https://daily-cloudcode-pa.sandbox.googleapis.com'
+    serviceUsageApiUrl: 'https://serviceusage.googleapis.com'
 };
 
 function useMirrorUrls() {
@@ -3010,7 +3069,7 @@ function updateCooldownDisplays() {
                         const shortModel = model.replace('gemini-', '').replace('-exp', '')
                             .replace('2.0-', '2-').replace('1.5-', '1.5-');
                         const timeDisplay = formatCooldownTime(remaining).replace(/s$/, '').replace(/ /g, '');
-                        badge.innerHTML = `🔧 ${shortModel}: ${timeDisplay}`;
+                        badge.innerHTML = `⏰ ${shortModel}: ${timeDisplay}`;
                     }
                 }
             }
@@ -3153,3 +3212,8 @@ document.addEventListener('DOMContentLoaded', function () {
         });
     }
 });
+
+function autoSetKeepaliveUrl() {
+    const url = `${window.location.protocol}//${window.location.host}`;
+    document.getElementById('keepaliveUrl').value = url;
+}

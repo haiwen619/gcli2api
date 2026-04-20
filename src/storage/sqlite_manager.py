@@ -25,6 +25,8 @@ class SQLiteManager:
         "user_email",
         "model_cooldowns",
         "preview",
+        "tier",
+        "enable_credit",
     }
 
     # 所有必需的列定义（用于自动校验和修复）
@@ -37,6 +39,7 @@ class SQLiteManager:
             ("user_email", "TEXT"),
             ("model_cooldowns", "TEXT DEFAULT '{}'"),
             ("preview", "INTEGER DEFAULT 1"),
+            ("tier", "TEXT DEFAULT 'pro'"),
             ("rotation_order", "INTEGER DEFAULT 0"),
             ("call_count", "INTEGER DEFAULT 0"),
             ("created_at", "REAL DEFAULT (unixepoch())"),
@@ -49,6 +52,8 @@ class SQLiteManager:
             ("last_success", "REAL"),
             ("user_email", "TEXT"),
             ("model_cooldowns", "TEXT DEFAULT '{}'"),
+            ("tier", "TEXT DEFAULT 'pro'"),
+            ("enable_credit", "INTEGER DEFAULT 0"),
             ("rotation_order", "INTEGER DEFAULT 0"),
             ("call_count", "INTEGER DEFAULT 0"),
             ("created_at", "REAL DEFAULT (unixepoch())"),
@@ -170,6 +175,9 @@ class SQLiteManager:
                 -- preview 状态 (只对 geminicli 有效，默认为 true)
                 preview INTEGER DEFAULT 1,
 
+                -- tier 状态 (只对 geminicli 有效，默认为 pro)
+                tier TEXT DEFAULT 'pro',
+
                 -- 轮换相关
                 rotation_order INTEGER DEFAULT 0,
                 call_count INTEGER DEFAULT 0,
@@ -196,6 +204,12 @@ class SQLiteManager:
 
                 -- 模型级 CD 支持 (JSON: {model_name: cooldown_timestamp})
                 model_cooldowns TEXT DEFAULT '{}',
+
+                -- tier 状态 (默认为 pro)
+                tier TEXT DEFAULT 'pro',
+
+                -- 是否启用信用额度模式（仅 antigravity，有效值 0/1）
+                enable_credit INTEGER DEFAULT 0,
 
                 -- 轮换相关
                 rotation_order INTEGER DEFAULT 0,
@@ -369,13 +383,7 @@ class SQLiteManager:
 
         Args:
             mode: 凭证模式 ("geminicli" 或 "antigravity")
-            model_name: 完整模型名（如 "gemini-2.0-flash-exp", "gemini-2.0-flash-thinking-exp-01-21"）
-
-        Note:
-            - 对于 geminicli 模式:
-              - 如果模型名包含 "preview": 只能使用 preview=True 的凭证
-              - 如果模型名不包含 "preview": 除非没有 preview=False 的凭证，否则只使用 preview=False 的凭证
-            - 对于 antigravity: 不检查 preview 状态
+            model_name: 完整模型名（如 "gemini-2.0-flash-exp", "gemini-3-flash-preview"）
         """
         self._ensure_initialized()
 
@@ -384,98 +392,78 @@ class SQLiteManager:
             async with aiosqlite.connect(self._db_path) as db:
                 current_time = time.time()
 
-                # 确定模型名用于冷却检查
-                if model_name:
-                    # 所有模式都使用完整模型名
-                    pass
-
-                # 根据模式构建查询
                 if mode == "geminicli":
-                    # geminicli 模式，需要处理 preview 状态
+                    tier_clause = ""
+                    if model_name and "pro" in model_name.lower():
+                        tier_clause = "AND (tier IS NULL OR tier != 'free')"
+
                     async with db.execute(f"""
                         SELECT filename, credential_data, model_cooldowns, preview
                         FROM {table_name}
-                        WHERE disabled = 0
+                        WHERE disabled = 0 {tier_clause}
                         ORDER BY RANDOM()
                     """) as cursor:
                         rows = await cursor.fetchall()
 
                         if not model_name:
-                            # 没有提供模型名，返回第一个可用凭证
                             if rows:
                                 filename, credential_json, _, _ = rows[0]
                                 credential_data = json.loads(credential_json)
                                 return filename, credential_data
                             return None
 
-                        # 检查模型是否为 preview 模型
                         is_preview_model = "preview" in model_name.lower()
-
-                        # 分别收集 preview=False 和 preview=True 的可用凭证
                         non_preview_creds = []
                         preview_creds = []
 
                         for filename, credential_json, model_cooldowns_json, preview in rows:
                             model_cooldowns = json.loads(model_cooldowns_json or '{}')
-
-                            # 检查该模型是否在冷却中
                             model_cooldown = model_cooldowns.get(model_name)
                             if model_cooldown is None or current_time >= model_cooldown:
-                                # 该模型未冷却或冷却已过期
                                 if preview:
                                     preview_creds.append((filename, credential_json))
                                 else:
                                     non_preview_creds.append((filename, credential_json))
 
-                        # 根据模型类型选择凭证
                         if is_preview_model:
-                            # preview 模型只能使用 preview=True 的凭证
                             if preview_creds:
                                 filename, credential_json = preview_creds[0]
                                 credential_data = json.loads(credential_json)
                                 return filename, credential_data
                         else:
-                            # 非 preview 模型
-                            # 除非没有 preview=False 的凭证，否则只使用 preview=False 的凭证
                             if non_preview_creds:
-                                # 存在 preview=False 的凭证，只使用它们
                                 filename, credential_json = non_preview_creds[0]
                                 credential_data = json.loads(credential_json)
                                 return filename, credential_data
                             elif preview_creds:
-                                # 不存在 preview=False 的凭证，使用 preview=True 作为后备
                                 filename, credential_json = preview_creds[0]
                                 credential_data = json.loads(credential_json)
                                 return filename, credential_data
 
                         return None
                 else:
-                    # antigravity 模式，不需要处理 preview
                     async with db.execute(f"""
-                        SELECT filename, credential_data, model_cooldowns
+                        SELECT filename, credential_data, model_cooldowns, enable_credit
                         FROM {table_name}
                         WHERE disabled = 0
                         ORDER BY RANDOM()
                     """) as cursor:
                         rows = await cursor.fetchall()
 
-                        # 如果没有提供 model_name，使用第一个可用凭证
                         if not model_name:
                             if rows:
-                                filename, credential_json, _ = rows[0]
+                                filename, credential_json, _, enable_credit = rows[0]
                                 credential_data = json.loads(credential_json)
+                                credential_data["enable_credit"] = bool(enable_credit)
                                 return filename, credential_data
                             return None
 
-                        # 如果提供了 model_name，检查模型级冷却
-                        for filename, credential_json, model_cooldowns_json in rows:
+                        for filename, credential_json, model_cooldowns_json, enable_credit in rows:
                             model_cooldowns = json.loads(model_cooldowns_json or '{}')
-
-                            # 检查该模型是否在冷却中
                             model_cooldown = model_cooldowns.get(model_name)
                             if model_cooldown is None or current_time >= model_cooldown:
-                                # 该模型未冷却或冷却已过期
                                 credential_data = json.loads(credential_json)
+                                credential_data["enable_credit"] = bool(enable_credit)
                                 return filename, credential_data
 
                         return None
@@ -644,6 +632,8 @@ class SQLiteManager:
 
             for key, value in state_updates.items():
                 if key in self.STATE_FIELDS:
+                    if key == "enable_credit" and mode != "antigravity":
+                        continue
                     if key in ("error_codes", "error_messages", "model_cooldowns"):
                         # JSON 字段需要序列化
                         set_clauses.append(f"{key} = ?")
@@ -701,7 +691,7 @@ class SQLiteManager:
                 # 精确匹配
                 if mode == "geminicli":
                     async with db.execute(f"""
-                        SELECT disabled, error_codes, last_success, user_email, model_cooldowns, preview
+                        SELECT disabled, error_codes, last_success, user_email, model_cooldowns, preview, tier
                         FROM {table_name} WHERE filename = ?
                     """, (filename,)) as cursor:
                         row = await cursor.fetchone()
@@ -716,6 +706,7 @@ class SQLiteManager:
                                 "user_email": row[3],
                                 "model_cooldowns": json.loads(model_cooldowns_json),
                                 "preview": bool(row[5]) if row[5] is not None else True,
+                                "tier": row[6] if row[6] is not None else "pro",
                             }
 
                     # 返回默认状态
@@ -726,11 +717,12 @@ class SQLiteManager:
                         "user_email": None,
                         "model_cooldowns": {},
                         "preview": True,
+                        "tier": "pro",
                     }
                 else:
                     # antigravity 模式
                     async with db.execute(f"""
-                        SELECT disabled, error_codes, last_success, user_email, model_cooldowns
+                        SELECT disabled, error_codes, last_success, user_email, model_cooldowns, tier, enable_credit
                         FROM {table_name} WHERE filename = ?
                     """, (filename,)) as cursor:
                         row = await cursor.fetchone()
@@ -744,6 +736,8 @@ class SQLiteManager:
                                 "last_success": row[2] or time.time(),
                                 "user_email": row[3],
                                 "model_cooldowns": json.loads(model_cooldowns_json),
+                                "tier": row[5] if row[5] is not None else "pro",
+                                "enable_credit": bool(row[6]) if row[6] is not None else False,
                             }
 
                     # 返回默认状态
@@ -753,6 +747,8 @@ class SQLiteManager:
                         "last_success": time.time(),
                         "user_email": None,
                         "model_cooldowns": {},
+                        "tier": "pro",
+                        "enable_credit": False,
                     }
 
         except Exception as e:
@@ -769,7 +765,7 @@ class SQLiteManager:
                 if mode == "geminicli":
                     async with db.execute(f"""
                         SELECT filename, disabled, error_codes, last_success,
-                               user_email, model_cooldowns, preview
+                               user_email, model_cooldowns, preview, tier
                         FROM {table_name}
                     """) as cursor:
                         rows = await cursor.fetchall()
@@ -797,6 +793,7 @@ class SQLiteManager:
                                 "user_email": row[4],
                                 "model_cooldowns": model_cooldowns,
                                 "preview": bool(row[6]) if row[6] is not None else True,
+                                "tier": row[7] if row[7] is not None else "pro",
                             }
 
                         return states
@@ -804,7 +801,7 @@ class SQLiteManager:
                     # antigravity 模式
                     async with db.execute(f"""
                         SELECT filename, disabled, error_codes, last_success,
-                               user_email, model_cooldowns
+                               user_email, model_cooldowns, tier, enable_credit
                         FROM {table_name}
                     """) as cursor:
                         rows = await cursor.fetchall()
@@ -831,6 +828,8 @@ class SQLiteManager:
                                 "last_success": row[3] or time.time(),
                                 "user_email": row[4],
                                 "model_cooldowns": model_cooldowns,
+                                "tier": row[6] if row[6] is not None else "pro",
+                                "enable_credit": bool(row[7]) if row[7] is not None else False,
                             }
 
                         return states
@@ -847,7 +846,8 @@ class SQLiteManager:
         mode: str = "geminicli",
         error_code_filter: Optional[str] = None,
         cooldown_filter: Optional[str] = None,
-        preview_filter: Optional[str] = None
+        preview_filter: Optional[str] = None,
+        tier_filter: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         获取凭证的摘要信息（不包含完整凭证数据）- 支持分页和状态筛选
@@ -860,6 +860,7 @@ class SQLiteManager:
             error_code_filter: 错误码筛选（格式如"400"或"403"，筛选包含该错误码的凭证）
             cooldown_filter: 冷却状态筛选（"in_cooldown"=冷却中, "no_cooldown"=未冷却）
             preview_filter: Preview筛选（"preview"=支持preview, "no_preview"=不支持preview，仅geminicli模式有效）
+            tier_filter: tier筛选（"free", "pro", "ultra"）
 
         Returns:
             包含 items（凭证列表）、total（总数）、offset、limit 的字典
@@ -895,12 +896,16 @@ class SQLiteManager:
 
                 filter_value = None
                 filter_int = None
+                filter_none = False
                 if error_code_filter and str(error_code_filter).strip().lower() != "all":
-                    filter_value = str(error_code_filter).strip()
-                    try:
-                        filter_int = int(filter_value)
-                    except ValueError:
-                        filter_int = None
+                    if str(error_code_filter).strip().lower() == "none":
+                        filter_none = True
+                    else:
+                        filter_value = str(error_code_filter).strip()
+                        try:
+                            filter_int = int(filter_value)
+                        except ValueError:
+                            filter_int = None
 
                 # 构建WHERE子句
                 where_clause = ""
@@ -911,7 +916,7 @@ class SQLiteManager:
                 if mode == "geminicli":
                     all_query = f"""
                         SELECT filename, disabled, error_codes, last_success,
-                               user_email, rotation_order, model_cooldowns, preview
+                               user_email, rotation_order, model_cooldowns, preview, tier
                         FROM {table_name}
                         {where_clause}
                         ORDER BY rotation_order
@@ -919,7 +924,7 @@ class SQLiteManager:
                 else:
                     all_query = f"""
                         SELECT filename, disabled, error_codes, last_success,
-                               user_email, rotation_order, model_cooldowns
+                               user_email, rotation_order, model_cooldowns, tier, enable_credit
                         FROM {table_name}
                         {where_clause}
                         ORDER BY rotation_order
@@ -946,6 +951,12 @@ class SQLiteManager:
                             }
 
                         error_codes = json.loads(error_codes_json)
+
+                        # 筛选无错误的凭证
+                        if filter_none:
+                            if error_codes:
+                                continue
+
                         if filter_value:
                             match = False
                             for code in error_codes:
@@ -970,19 +981,28 @@ class SQLiteManager:
                             "user_email": row[4],
                             "rotation_order": row[5],
                             "model_cooldowns": active_cooldowns,
+                            "tier": row[8] if mode == "geminicli" and row[8] is not None else (
+                                row[7] if mode != "geminicli" and row[7] is not None else "pro"
+                            ),
                         }
 
-                        # preview状态只对geminicli模式有效
+                        if mode != "geminicli":
+                            summary["enable_credit"] = bool(row[8]) if row[8] is not None else False
+
                         if mode == "geminicli":
                             summary["preview"] = bool(row[7]) if row[7] is not None else True
 
-                        # 应用 preview 筛选（仅对 geminicli 模式）
-                        if mode == "geminicli" and preview_filter:
-                            preview_value = summary.get("preview", True)
-                            if preview_filter == "preview" and not preview_value:
-                                continue  # 跳过不支持 preview 的凭证
-                            elif preview_filter == "no_preview" and preview_value:
-                                continue  # 跳过支持 preview 的凭证
+                            if preview_filter:
+                                preview_value = summary.get("preview", True)
+                                if preview_filter == "preview" and not preview_value:
+                                    continue
+                                elif preview_filter == "no_preview" and preview_value:
+                                    continue
+
+                        # 应用tier筛选
+                        if tier_filter and tier_filter in ("free", "pro", "ultra"):
+                            if summary["tier"] != tier_filter:
+                                continue
 
                         # 应用冷却筛选
                         if cooldown_filter == "in_cooldown":
@@ -1269,6 +1289,39 @@ class SQLiteManager:
 
         except Exception as e:
             log.error(f"Error setting model cooldown for {filename}: {e}")
+            return False
+
+    async def clear_all_model_cooldowns(
+        self,
+        filename: str,
+        mode: str = "geminicli"
+    ) -> bool:
+        """清除某个凭证的所有模型冷却时间"""
+        self._ensure_initialized()
+
+        filename = os.path.basename(filename)
+
+        try:
+            table_name = self._get_table_name(mode)
+            async with aiosqlite.connect(self._db_path) as db:
+                result = await db.execute(f"""
+                    UPDATE {table_name}
+                    SET model_cooldowns = '{{}}',
+                        updated_at = unixepoch()
+                    WHERE filename = ?
+                """, (filename,))
+                updated_count = result.rowcount
+                await db.commit()
+
+            if updated_count == 0:
+                log.warning(f"Credential {filename} not found")
+                return False
+
+            log.debug(f"Cleared all model cooldowns: {filename} (mode={mode})")
+            return True
+
+        except Exception as e:
+            log.error(f"Error clearing all model cooldowns for {filename}: {e}")
             return False
 
     async def record_success(
